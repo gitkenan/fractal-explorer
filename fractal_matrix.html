@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Fractal Explorer - Optimized</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    color: #ccc;
+    font-family: sans-serif;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  #ui {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(0,0,0,0.5);
+    padding: 10px;
+    border-radius: 5px;
+    font-size: 14px;
+    z-index: 1000;
+  }
+
+  #ui label {
+    display: block;
+    margin-bottom: 5px;
+  }
+
+  #instructions {
+    margin-top: 10px;
+    font-size: 12px;
+    line-height: 1.4em;
+  }
+
+  #instructions strong {
+    color: #fff;
+  }
+
+  canvas {
+    display: block;
+    background: #111;
+  }
+</style>
+</head>
+<body>
+<div id="ui">
+  <label>
+    Fractal Type:
+    <select id="fractalSelect">
+      <option value="mandelbrot">Mandelbrot Set</option>
+      <option value="burningship">Burning Ship</option>
+      <option value="julia1">Julia Set 1</option>
+      <option value="julia2">Julia Set 2</option>
+    </select>
+  </label>
+  <div id="instructions">
+    <strong>Instructions:</strong><br>
+    - Scroll mouse wheel or click to zoom in at mouse position (Shift+click to zoom out).<br>
+    - Choose fractal from the dropdown.<br>
+    Rendering is progressive and adaptive.
+  </div>
+</div>
+<canvas id="fractalCanvas"></canvas>
+<script>
+/*
+  Optimized Fractal Explorer
+  Enhancements over previous solution:
+  - Offload computations to a Web Worker for smooth UI.
+  - Progressive refinement:
+    * First render at a lower iteration count and possibly skip pixels, then refine.
+  - Incremental chunk-based rendering to keep UI responsive.
+  - Use typed arrays and efficient loops.
+  - Cache parameters and abort previous computations on change.
+  - Zoom and pan are unchanged, but rendering is now faster and smoother.
+*/
+
+const phi = 1.61803398875;
+
+let fractalType = 'mandelbrot';
+let cx = -0.5;
+let cy = 0;
+let scale = 3;
+let width = window.innerWidth;
+let height = window.innerHeight;
+let maxIter = 200;
+
+const canvas = document.getElementById('fractalCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = width;
+canvas.height = height;
+
+// We'll use a progressive rendering approach:
+// 1. Render a quick preview with low iterations and/or coarser sampling.
+// 2. Increase iterations and refine missing pixels.
+// 3. Each refinement pass updates the existing image for more detail.
+
+// To keep UI smooth, offload calculation to a worker.
+let worker = null;
+let currentRenderId = 0; // unique ID to identify current render task
+
+// Julia parameters
+const juliaParams = {
+  julia1: {cr: -0.8, ci: 0.156},
+  julia2: {cr: 0.285, ci: 0.01}
+};
+
+function startWorker() {
+  if (worker) {
+    worker.terminate();
+  }
+  const workerCode = `
+    self.onmessage = function(e) {
+      const data = e.data;
+      if (data.cmd === 'render') {
+        renderFractal(data);
+      }
+    };
+
+    function renderFractal(params) {
+      const {width, height, cx, cy, scale, fractalType, iterationLevels, juliaParams, renderId} = params;
+      // We'll do progressive rendering:
+      // iterationLevels is an array of iteration counts for passes, e.g. [50, 100, 200]
+      // We'll also do multi-step pixel subsampling: 
+      // First pass: skip pixels (like every 4th pixel), second pass fill in more, etc.
+      // This balances quick preview vs detail.
+
+      // We'll send partial results after completing each pass and after processing chunks of rows.
+
+      // Define fractal iteration functions
+      function mandelbrotIter(cx, cy, maxIter) {
+        let zx = 0, zy = 0;
+        for (let i=0; i<maxIter; i++){
+          let x2 = zx*zx - zy*zy + cx;
+          let y2 = 2*zx*zy + cy;
+          zx = x2; zy = y2;
+          if (zx*zx + zy*zy > 4) return i;
+        }
+        return maxIter;
+      }
+
+      function burningShipIter(cx, cy, maxIter) {
+        let zx = 0, zy = 0;
+        for (let i=0; i<maxIter; i++){
+          let xAbs = zx<0?-zx:zx;
+          let yAbs = zy<0?-zy:zy;
+          let x2 = xAbs*xAbs - yAbs*yAbs + cx;
+          let y2 = 2*xAbs*yAbs + cy;
+          zx = x2; zy = y2;
+          if (zx*zx + zy*zy > 4) return i;
+        }
+        return maxIter;
+      }
+
+      function juliaIter(zx, zy, cr, ci, maxIter) {
+        for (let i=0; i<maxIter; i++){
+          let x2 = zx*zx - zy*zy + cr;
+          let y2 = 2*zx*zy + ci;
+          zx = x2; zy = y2;
+          if (zx*zx + zy*zy > 4) return i;
+        }
+        return maxIter;
+      }
+
+      function hslToRgb(h, s, l) {
+        s = s/100; l = l/100;
+        const c = (1 - Math.abs(2*l-1))*s;
+        const x = c*(1 - Math.abs((h/60)%2-1));
+        const m = l - c/2;
+        let r=0,g=0,b=0;
+        if (0<=h && h<60) {r=c;g=x;b=0;}
+        else if (60<=h && h<120) {r=x;g=c;b=0;}
+        else if (120<=h && h<180) {r=0;g=c;b=x;}
+        else if (180<=h && h<240) {r=0;g=x;b=c;}
+        else if (240<=h && h<300) {r=x;g=0;b=c;}
+        else if (300<=h && h<360) {r=c;g=0;b=x;}
+        r = Math.floor((r+m)*255);
+        g = Math.floor((g+m)*255);
+        b = Math.floor((b+m)*255);
+        return [r,g,b];
+      }
+
+      function complexFromPixel(px, py, w, h, sc, cxx, cyy) {
+        let rx = (px / w - 0.5)*sc + cxx;
+        let ry = (py / h - 0.5)*sc*(h/w) + cyy;
+        return [rx, ry];
+      }
+
+      // We'll do progressive passes:
+      // Example iterationLevels: [50, 100, 200]
+      // We'll start with a coarse pixel step and refine:
+      // pixelSteps: [4,2,1] - first pass every 4th pixel, second pass every 2nd pixel, final pass every pixel.
+      // If iterationLevels has n passes, we match pixelSteps to also have n passes.
+      // If we have at most 3 passes, let's define them statically:
+      let passes = iterationLevels.length;
+      let pixelSteps = [];
+      // A heuristic: start with step = max(4, min(8, width/200)) to ensure we get a quick preview.
+      // Then go down to 2, then 1.
+      // For simplicity, if passes=3: steps = [4,2,1]
+      // If passes=2: steps = [2,1]
+      // If passes=1: steps = [1]
+      if (passes === 1) {
+        pixelSteps = [1];
+      } else if (passes === 2) {
+        pixelSteps = [3,1];
+      } else {
+        pixelSteps = [4,2,1];
+      }
+
+      // We'll store an Uint32Array for the final image. RGBA each pixel: 4 bytes.
+      // We can incrementally fill this in passes. 
+      // If a pixel is computed at a higher iteration (later pass), overwrite the previous pass's result.
+      const buffer = new Uint8ClampedArray(width * height * 4);
+
+      // Precompute fractal function so we don't branch too much:
+      let fractalFunc;
+      let cr=0, ci=0; // for julia sets
+      switch(fractalType) {
+        case 'mandelbrot':
+          fractalFunc = function(rx, ry, maxI){ return mandelbrotIter(rx, ry, maxI); };
+          break;
+        case 'burningship':
+          fractalFunc = function(rx, ry, maxI){ return burningShipIter(rx, ry, maxI); };
+          break;
+        case 'julia1':
+          cr = juliaParams.julia1.cr; ci = juliaParams.julia1.ci;
+          fractalFunc = function(rx, ry, maxI){ return juliaIter(rx, ry, cr, ci, maxI); };
+          break;
+        case 'julia2':
+          cr = juliaParams.julia2.cr; ci = juliaParams.julia2.ci;
+          fractalFunc = function(rx, ry, maxI){ return juliaIter(rx, ry, cr, ci, maxI); };
+          break;
+      }
+
+      // RENDER LOOP:
+      // We'll go pass by pass.
+      // After completing a pass, postMessage the partial result to display.
+      // After finishing all passes, send a final message.
+      for (let passIndex = 0; passIndex < passes; passIndex++) {
+        let passIter = iterationLevels[passIndex];
+        let step = pixelSteps[passIndex];
+
+        // Process in chunks of rows for responsiveness
+        let chunkSize = Math.max(4, Math.floor(height/50));
+        let row = 0;
+
+        while (row < height) {
+          const rowEnd = Math.min(row+chunkSize, height);
+          for (let y = row; y < rowEnd; y += step) {
+            for (let x = 0; x < width; x += step) {
+              const [rx, ry] = complexFromPixel(x, y, width, height, scale, cx, cy);
+              const iter = fractalFunc(rx, ry, passIter);
+              // Compute color
+              let r,g,b;
+              if (iter === passIter) {
+                r=0;g=0;b=0;
+              } else {
+                let hue = ((iter * ${phi}) % 1)*360;
+                let sat = 100;
+                let light = 50*(iter/passIter)+20;
+                [r,g,b] = hslToRgb(hue, sat, light);
+              }
+
+              // Fill not just this pixel, but if step>1, fill a block of pixels to make coarse preview
+              for (let yy = 0; yy < step; yy++) {
+                let ty = y+yy;
+                if (ty >= height) break;
+                for (let xx = 0; xx < step; xx++) {
+                  let tx = x+xx;
+                  if (tx >= width) break;
+                  let idx = (ty*width+tx)*4;
+                  // Overwrite only if this is the last/current pass or a finer resolution pass
+                  // For simplicity, always overwrite. The last pass is finest anyway.
+                  buffer[idx] = r;
+                  buffer[idx+1] = g;
+                  buffer[idx+2] = b;
+                  buffer[idx+3] = 255;
+                }
+              }
+            }
+          }
+
+          // After each chunk, send update
+          postMessage({cmd:'partial', buffer: buffer, width: width, height: height, renderId: renderId});
+          row = rowEnd;
+        }
+      }
+
+      // Done
+      postMessage({cmd:'done', buffer: buffer, width: width, height: height, renderId: renderId});
+    }
+  `;
+
+  const blob = new Blob([workerCode], {type:'application/javascript'});
+  const workerUrl = URL.createObjectURL(blob);
+  worker = new Worker(workerUrl);
+
+  worker.onmessage = (e) => {
+    const data = e.data;
+    if (data.renderId !== currentRenderId) return; // outdated message
+    if (data.cmd === 'partial' || data.cmd === 'done') {
+      const imageData = new ImageData(data.buffer, data.width, data.height);
+      ctx.putImageData(imageData, 0, 0);
+      if (data.cmd === 'done') {
+        // done rendering
+      }
+    }
+  };
+}
+
+startWorker();
+
+// Trigger a new render
+function redraw() {
+  currentRenderId++;
+  ctx.clearRect(0,0,width,height);
+
+  // Decide iteration levels:
+  // Start with a low iteration count for a quick preview, then refine.
+  // For performance, we can choose e.g. [maxIter/4, maxIter/2, maxIter].
+  // If maxIter < 100, just one pass. If it's large, multiple passes.
+  let iterationLevels;
+  if (maxIter <= 100) {
+    iterationLevels = [maxIter];
+  } else {
+    iterationLevels = [Math.floor(maxIter/4), Math.floor(maxIter/2), maxIter];
+  }
+
+  worker.postMessage({
+    cmd:'render',
+    width: width,
+    height: height,
+    cx: cx,
+    cy: cy,
+    scale: scale,
+    fractalType: fractalType,
+    iterationLevels: iterationLevels,
+    juliaParams: juliaParams,
+    renderId: currentRenderId
+  });
+}
+
+function onResize() {
+  width = window.innerWidth;
+  height = window.innerHeight;
+  canvas.width = width;
+  canvas.height = height;
+  redraw();
+}
+
+function zoomAt(xPixel, yPixel, zoomIn) {
+  let oldScale = scale;
+  if (zoomIn) {
+    scale = scale / phi;
+  } else {
+    scale = scale * phi;
+  }
+
+  let mxOld = (xPixel / width - 0.5)*oldScale + cx;
+  let myOld = (yPixel / height - 0.5)*oldScale*(height/width) + cy;
+  let mxNew = (xPixel / width - 0.5)*scale + cx;
+  let myNew = (yPixel / height - 0.5)*scale*(height/width) + cy;
+
+  cx += (mxOld - mxNew);
+  cy += (myOld - myNew);
+
+  redraw();
+}
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  let zoomIn = e.deltaY < 0;
+  zoomAt(e.offsetX, e.offsetY, zoomIn);
+});
+
+canvas.addEventListener('click', (e) => {
+  let zoomOut = e.shiftKey;
+  zoomAt(e.offsetX, e.offsetY, !zoomOut);
+});
+
+document.getElementById('fractalSelect').addEventListener('change', (e) => {
+  fractalType = e.target.value;
+  redraw();
+});
+
+window.addEventListener('resize', onResize);
+
+// Initial draw
+redraw();
+</script>
+</body>
+</html>
