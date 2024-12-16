@@ -32,9 +32,6 @@ Fractal Explorer is a web-based application that allows users to visualize and e
 ## Contributing
 Contributions are welcome! If you have suggestions or improvements, feel free to submit a pull request.
 
-## License
-This project is licensed under the MIT License. See the LICENSE file for details.
-
 ## Acknowledgments
 - Inspired by fractal mathematics and visualization techniques.
 - Uses HTML5 Canvas API for rendering graphics.
